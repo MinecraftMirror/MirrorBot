@@ -12,6 +12,17 @@ jobs:
       contents: write  # Need write access to push to repository
       
     steps:
+      - name: Check PAT permissions
+        run: |
+          echo "Checking PAT permissions..."
+          # This doesn't print the token but gives information about what it can access
+          curl -s -H "Authorization: token ${{ secrets.GH_PAT }}" \
+            https://api.github.com/user | grep -v "token" | jq '.login'
+          
+          # Check organization membership
+          curl -s -H "Authorization: token ${{ secrets.GH_PAT }}" \
+            https://api.github.com/user/orgs | grep -v "token" | jq '.[].login'
+      
       - name: Check repository existence
         id: check-repo
         run: |
@@ -27,19 +38,23 @@ jobs:
         if: steps.check-repo.outputs.exists == 'false'
         run: |
           curl -X POST -H "Authorization: token ${{ secrets.GH_PAT }}" \
-            -d '{"name":"version_manifest_v2","auto_init":true}' \
+            -d '{"name":"version_manifest_v2","auto_init":true,"private":false}' \
             https://api.github.com/orgs/MinecraftMirror/repos
           echo "Waiting for repository to initialize..."
           sleep 10
       
-      - name: Clone repository
+      - name: Clone and update repository
+        id: clone-repository
         run: |
           # Make sure we're working with a clean directory
           rm -rf tmp_repo
           mkdir -p tmp_repo
           cd tmp_repo
           
-          git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/MinecraftMirror/version_manifest_v2.git .
+          # Clone using the token in the URL
+          git clone https://${{ secrets.GH_PAT }}@github.com/MinecraftMirror/version_manifest_v2.git .
+          
+          # Setup Git user
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
           
@@ -65,14 +80,20 @@ jobs:
             cp version_manifest_v2.json version_manifest_v2.json.old
             git add version_manifest_v2.json version_manifest_v2.json.old
             git commit -m "Update version manifest $(date +'%Y-%m-%d')"
-            git push
-            echo "manifest_changed=true" >> $GITHUB_OUTPUT
+            
+            # Set the remote URL with auth token
+            git remote set-url origin https://${{ secrets.GH_PAT }}@github.com/MinecraftMirror/version_manifest_v2.git
+            
+            # Force push to ensure success (use with caution)
+            git push -f origin HEAD:main
+            
+            echo "manifest_changed=true" >> $GITHUB_ENV
           else
-            echo "manifest_changed=false" >> $GITHUB_OUTPUT
+            echo "manifest_changed=false" >> $GITHUB_ENV
           fi
       
       - name: Dispatch version mirroring workflow
-        if: steps.clone-repository.outputs.manifest_changed == 'true'
+        if: env.manifest_changed == 'true'
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.GH_PAT }}
