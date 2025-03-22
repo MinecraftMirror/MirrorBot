@@ -12,9 +12,6 @@ jobs:
       contents: write  # Need write access to push to repository
       
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        
       - name: Check repository existence
         id: check-repo
         run: |
@@ -34,45 +31,48 @@ jobs:
             https://api.github.com/orgs/MinecraftMirror/repos
           echo "Waiting for repository to initialize..."
           sleep 10
-          echo "Waiting for repository to initialize..."
-          sleep 10
+      
       - name: Clone repository
         run: |
+          # Make sure we're working with a clean directory
+          rm -rf tmp_repo
+          mkdir -p tmp_repo
+          cd tmp_repo
+          
           git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/MinecraftMirror/version_manifest_v2.git .
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
-          git config user.email "action@github.com"
-      - name: Fetch version manifest
-        run: |
+          
+          # Fetch the version manifest
           curl -s https://piston-meta.mojang.com/mc/game/version_manifest_v2.json -o version_manifest_v2.json
-      
-      - name: Check for changes
-        id: check-changes
-        run: |
+          
+          # Check for changes
           if [ -f "version_manifest_v2.json.old" ]; then
             if cmp -s "version_manifest_v2.json.old" "version_manifest_v2.json"; then
               echo "No changes detected in the manifest"
-              echo "changed=false" >> $GITHUB_OUTPUT
+              CHANGED=false
             else
               echo "Changes detected in the manifest"
-              echo "changed=true" >> $GITHUB_OUTPUT
+              CHANGED=true
             fi
           else
             echo "No previous manifest found, treating as changed"
-            echo "changed=true" >> $GITHUB_OUTPUT
+            CHANGED=true
+          fi
+          
+          # If changed, commit and push
+          if [ "$CHANGED" = true ]; then
+            cp version_manifest_v2.json version_manifest_v2.json.old
+            git add version_manifest_v2.json version_manifest_v2.json.old
+            git commit -m "Update version manifest $(date +'%Y-%m-%d')"
+            git push
+            echo "manifest_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "manifest_changed=false" >> $GITHUB_OUTPUT
           fi
       
-      - name: Commit and push if changed
-        if: steps.check-changes.outputs.changed == 'true'
-        run: |
-          cp version_manifest_v2.json version_manifest_v2.json.old
-          
-          git add version_manifest_v2.json version_manifest_v2.json.old
-          git commit -m "Update version manifest $(date +'%Y-%m-%d')"
-          git push
-      
       - name: Dispatch version mirroring workflow
-        if: steps.check-changes.outputs.changed == 'true'
+        if: steps.clone-repository.outputs.manifest_changed == 'true'
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.GH_PAT }}
