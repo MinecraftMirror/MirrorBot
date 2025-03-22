@@ -1,0 +1,134 @@
+name: Mirror Minecraft Libraries
+
+on:
+  repository_dispatch:
+    types: [versions-updated]
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  mirror-libraries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      
+    steps:
+      - name: Checkout version repository
+        uses: actions/checkout@v4
+        with:
+          repository: 'MinecraftMirror/version'
+          token: ${{ secrets.GH_PAT }}
+          path: 'version-repo'
+          
+      - name: Checkout libraries repository
+        uses: actions/checkout@v4
+        with:
+          repository: 'MinecraftMirror/libraries'
+          token: ${{ secrets.GH_PAT }}
+          path: 'libraries-repo'
+          
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+          
+      - name: Process library URLs
+        run: |
+          python -c '
+          import os
+          import requests
+          import hashlib
+          from urllib.parse import urlparse
+          
+          # Create processed marker directory
+          os.makedirs("libraries-repo/processed", exist_ok=True)
+          
+          # Load already processed libraries
+          processed_libraries = set()
+          processed_file = "libraries-repo/processed/processed_libraries.txt"
+          if os.path.exists(processed_file):
+              with open(processed_file, "r") as f:
+                  processed_libraries = set(line.strip() for line in f)
+          
+          # Get all library URL files
+          library_files = []
+          for root, _, files in os.walk("version-repo/versions"):
+              for file in files:
+                  if file.endswith(".libraries.txt"):
+                      library_files.append(os.path.join(root, file))
+          
+          # Process each library URL file
+          new_processed = []
+          for lib_file in library_files:
+              print(f"Processing {lib_file}")
+              
+              with open(lib_file, "r") as f:
+                  libraries = [line.strip() for line in f if line.strip()]
+              
+              for url in libraries:
+                  if url in processed_libraries:
+                      print(f"Already processed: {url}")
+                      continue
+                  
+                  # Parse the URL to get the path
+                  parsed_url = urlparse(url)
+                  
+                  # Handle different URL formats
+                  if "libraries.minecraft.net" in url:
+                      # For libraries
+                      path = parsed_url.path.lstrip("/")
+                  elif "launcher.mojang.com" in url or "piston-data.mojang.com" in url:
+                      # For client/server jars
+                      filename = os.path.basename(parsed_url.path)
+                      path = f"minecraft/client-server/{filename}"
+                  else:
+                      # Other resources
+                      path = f"other{parsed_url.path}"
+                  
+                  # Create directory structure
+                  dir_path = os.path.dirname(os.path.join("libraries-repo", path))
+                  os.makedirs(dir_path, exist_ok=True)
+                  
+                  # Download the file
+                  print(f"Downloading {url} to {path}")
+                  try:
+                      response = requests.get(url, stream=True)
+                      response.raise_for_status()
+                      
+                      with open(os.path.join("libraries-repo", path), "wb") as f:
+                          for chunk in response.iter_content(chunk_size=8192):
+                              f.write(chunk)
+                      
+                      # Mark as processed
+                      new_processed.append(url)
+                      print(f"Successfully downloaded {url}")
+                  except Exception as e:
+                      print(f"Error downloading {url}: {e}")
+          
+          # Update processed files list
+          with open(processed_file, "a") as f:
+              for url in new_processed:
+                  f.write(f"{url}\n")
+          
+          print(f"Processed {len(new_processed)} new libraries")
+          '
+          
+      - name: Commit and push changes
+        working-directory: libraries-repo
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          
+          git add .
+          
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update libraries $(date +'%Y-%m-%d')"
+            git push
+          fi

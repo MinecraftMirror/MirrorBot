@@ -1,0 +1,60 @@
+name: Mirror Minecraft Version Manifest
+
+on:
+  schedule:
+    - cron: '0 0 1 * *'  # Run monthly on the 1st day
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  mirror-manifest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Need write access to push to repository
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: 'MinecraftMirror/version_manifest_v2'
+          token: ${{ secrets.GH_PAT }}  # Use a Personal Access Token with repo scope
+          
+      - name: Fetch version manifest
+        run: |
+          curl -s https://piston-meta.mojang.com/mc/game/version_manifest_v2.json -o version_manifest_v2.json
+          
+      - name: Check for changes
+        id: check-changes
+        run: |
+          if [ -f "version_manifest_v2.json.old" ]; then
+            if cmp -s "version_manifest_v2.json.old" "version_manifest_v2.json"; then
+              echo "No changes detected in the manifest"
+              echo "changed=false" >> $GITHUB_OUTPUT
+            else
+              echo "Changes detected in the manifest"
+              echo "changed=true" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "No previous manifest found, treating as changed"
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Commit and push if changed
+        if: steps.check-changes.outputs.changed == 'true'
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          
+          cp version_manifest_v2.json version_manifest_v2.json.old
+          
+          git add version_manifest_v2.json version_manifest_v2.json.old
+          git commit -m "Update version manifest $(date +'%Y-%m-%d')"
+          git push
+      
+      - name: Dispatch version mirroring workflow
+        if: steps.check-changes.outputs.changed == 'true'
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.GH_PAT }}
+          repository: MinecraftMirror/version
+          event-type: manifest-updated
+          client-payload: '{"manifest_updated": true}'

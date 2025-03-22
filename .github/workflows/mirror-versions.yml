@@ -1,0 +1,161 @@
+name: Mirror Minecraft Version JSONs
+
+on:
+  repository_dispatch:
+    types: [manifest-updated]
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  mirror-versions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: 'MinecraftMirror/version'
+          token: ${{ secrets.GH_PAT }}
+          
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Fetch version manifest
+        run: |
+          curl -s https://piston-meta.mojang.com/mc/game/version_manifest_v2.json -o manifest.json
+          
+      - name: Extract and download version JSONs
+        run: |
+          python -c '
+          import json
+          import os
+          import requests
+          import hashlib
+          
+          # Create directories
+          os.makedirs("versions", exist_ok=True)
+          os.makedirs("processed", exist_ok=True)
+          
+          # Load manifest
+          with open("manifest.json", "r") as f:
+              manifest = json.load(f)
+          
+          # Create a set of already processed versions
+          processed_versions = set()
+          if os.path.exists("processed/processed_versions.txt"):
+              with open("processed/processed_versions.txt", "r") as f:
+                  processed_versions = set(line.strip() for line in f)
+          
+          # Track new versions we process
+          new_processed = []
+          
+          # Process each version
+          for version in manifest["versions"]:
+              version_id = version["id"]
+              version_url = version["url"]
+              version_sha1 = version["sha1"]
+              
+              if version_id in processed_versions:
+                  print(f"Version {version_id} already processed, skipping...")
+                  continue
+                  
+              print(f"Processing version {version_id} from {version_url}")
+              
+              # Download version JSON
+              response = requests.get(version_url)
+              if response.status_code == 200:
+                  # Verify checksum
+                  content = response.content
+                  calculated_sha1 = hashlib.sha1(content).hexdigest()
+                  
+                  if calculated_sha1 != version_sha1:
+                      print(f"Warning: SHA1 mismatch for {version_id}. Expected {version_sha1}, got {calculated_sha1}")
+                  
+                  # Save the version JSON
+                  version_filename = f"versions/{version_id}.json"
+                  with open(version_filename, "wb") as f:
+                      f.write(content)
+                  
+                  # Parse the version JSON to extract library URLs
+                  try:
+                      version_data = json.loads(content)
+                      
+                      # Write the library URLs to a file for the next workflow
+                      library_urls_file = f"versions/{version_id}.libraries.txt"
+                      client_url = None
+                      
+                      # Extract libraries
+                      libraries = []
+                      if "libraries" in version_data:
+                          for lib in version_data["libraries"]:
+                              if "downloads" in lib and "artifact" in lib["downloads"] and "url" in lib["downloads"]["artifact"]:
+                                  libraries.append(lib["downloads"]["artifact"]["url"])
+                              
+                              # Check for classifiers (natives, etc.)
+                              if "downloads" in lib and "classifiers" in lib["downloads"]:
+                                  for classifier in lib["downloads"]["classifiers"].values():
+                                      if "url" in classifier:
+                                          libraries.append(classifier["url"])
+                      
+                      # Extract client jar
+                      if "downloads" in version_data and "client" in version_data["downloads"] and "url" in version_data["downloads"]["client"]:
+                          client_url = version_data["downloads"]["client"]["url"]
+                          libraries.append(client_url)
+                      
+                      # Extract server jar
+                      if "downloads" in version_data and "server" in version_data["downloads"] and "url" in version_data["downloads"]["server"]:
+                          server_url = version_data["downloads"]["server"]["url"]
+                          libraries.append(server_url)
+                      
+                      # Write library URLs to file
+                      if libraries:
+                          with open(library_urls_file, "w") as f:
+                              for url in libraries:
+                                  f.write(f"{url}\n")
+                  
+                      # Mark as processed
+                      new_processed.append(version_id)
+                      
+                  except json.JSONDecodeError:
+                      print(f"Error: Could not parse JSON for {version_id}")
+              else:
+                  print(f"Error: Failed to download {version_id}, status code: {response.status_code}")
+          
+          # Update processed versions list
+          with open("processed/processed_versions.txt", "a") as f:
+              for version_id in new_processed:
+                  f.write(f"{version_id}\n")
+          
+          # Report
+          print(f"Processed {len(new_processed)} new versions")
+          '
+          
+      - name: Commit and push changes
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          
+          git add versions/ processed/
+          
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update version JSONs $(date +'%Y-%m-%d')"
+            git push
+            
+            # Signal that new libraries might need to be mirrored
+            echo "LIBRARIES_UPDATED=true" >> $GITHUB_ENV
+          fi
+          
+      - name: Dispatch libraries mirroring workflow
+        if: env.LIBRARIES_UPDATED == 'true'
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.GH_PAT }}
+          repository: MinecraftMirror/libraries
+          event-type: versions-updated
+          client-payload: '{"versions_updated": true}'
